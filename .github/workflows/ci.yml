@@ -90,7 +90,8 @@ jobs:
           rpm -q --requires -p target/rpm/nvmetea-*.rpm
       - name: Install and run on el9 userspace
         run: |
-          dnf -y install target/rpm/nvmetea-*.rpm
+          # The container image sets tsflags=nodocs, which would skip the man pages.
+          dnf -y --setopt=tsflags= install target/rpm/nvmetea-*.rpm
           nvmetea --version
           nvmetea status --no-bpf
           test -f /usr/share/man/man1/nvmetea.1.gz
