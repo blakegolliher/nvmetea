@@ -58,6 +58,7 @@ build (no attach point), `c` = only a compiler clone (`.constprop`/`.isra`) exis
 | Capability | el9 6.12 (R) | Rocky 9.6 | Rocky 9.8 | Ubuntu 5.15 | Ubuntu 6.8 | Ubuntu 6.17 |
 |---|---|---|---|---|---|---|
 | vmlinux BTF (`CONFIG_DEBUG_INFO_BTF`) | Y | Y | Y | Y | Y | Y |
+| BPF ISA v3 with atomic fetch operations (objects are built with `-mcpu=v3`; kernel 5.12+) | Y | Y | Y | Y | Y | Y |
 | Module BTF (`CONFIG_DEBUG_INFO_BTF_MODULES`, `.BTF` in `nvme-tcp.ko`, `nvme-core.ko`) | Y | Y | Y | Y | Y | Y |
 | `CONFIG_DYNAMIC_FTRACE_WITH_DIRECT_CALLS` (fentry/fexit) | Y | Y | Y | Y | Y | Y |
 | `CONFIG_FPROBE` (kprobe_multi) | Y | Y | Y | - | Y | Y |

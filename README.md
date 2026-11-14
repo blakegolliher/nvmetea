@@ -133,8 +133,9 @@ See [docs/metrics.md](docs/metrics.md) for every metric, with example queries.
 
 ## Build from source
 
-You need Rust ≥ 1.85, clang, and the libelf and zlib headers. On Rocky 9:
-`dnf install clang elfutils-libelf-devel zlib-devel`.
+You need Rust ≥ 1.85 with `rustfmt`, clang, and the libelf and zlib headers.
+- Rocky 9: `dnf install clang elfutils-libelf-devel zlib-devel`
+- Ubuntu/Debian: `apt install clang libelf-dev zlib1g-dev pkg-config`
 
 ```sh
 cargo build --release          # target/release/nvmetea

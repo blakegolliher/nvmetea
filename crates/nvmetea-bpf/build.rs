@@ -20,6 +20,10 @@ fn main() {
     let mut args = vec![
         format!("-I{}", bpf_dir.display()),
         format!("-D__TARGET_ARCH_{arch}"),
+        // ISA v3: the programs use atomic fetch-and-add results (kernel 5.12+;
+        // every supported kernel has it). clang < 20 defaults to v1, which
+        // rejects them, so pin it and get the same objects from every clang.
+        "-mcpu=v3".to_string(),
         "-Wall".to_string(),
         "-Wno-unused-function".to_string(),
     ];
