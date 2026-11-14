@@ -1,0 +1,205 @@
+// nvmetea Phase-0 feasibility: WRITE path staging (inline vs R2T) + sequence-mapped receive notification. Read-only observation.
+// Boundaries (latency-model.md §5.3): E_START, E_SETUP, E_CMD_SENT, E_R2T_PROC, E_H2C_START,
+// E_H2C_SENT, E_RSP_PARSED, E_NVME_DONE, E_BLK_DONE; busy_h2c; sk_data_ready notifications.
+
+rawtracepoint:nvme_core:nvme_setup_cmd
+{
+  $rq = args.req;
+  if ($rq == 0) { return; }
+  $cmd = args.cmd;
+  if ($cmd == 0) { return; }
+  $treq = (struct nvme_tcp_request *)((uint64)$rq + sizeof(struct request));
+  $q = $treq->queue;
+  if ($q == 0) { return; }
+  if ((uint64)$q->sock->sk->sk_user_data != (uint64)$q) { return; }
+  if ($cmd->common.opcode != 1) { return; }            // WRITE only
+  $k = (uint64)$treq;
+  if (@t_setup[$k] != 0) { @stale_or_retry = count(); }
+  @t_setup[$k] = nsecs;
+  @t_blk[$k] = $rq->start_time_ns;
+  @len[$k] = $rq->__data_len;
+  @qp[$k] = (uint64)$q;
+  @writes_setup = count();
+}
+
+// receive context (to tell R2T-driven h2c setup from send-path continuation)
+fentry:nvme_tcp:nvme_tcp_recv_skb {
+  @in_recv[tid] = 1;
+  $skb = args.skb;
+  if ($skb != 0) { @skb_end[tid] = (uint64)((struct tcp_skb_cb *)$skb->cb)->end_seq; }
+}
+fexit:nvme_tcp:nvme_tcp_recv_skb { delete(@in_recv, tid); delete(@skb_end, tid); }
+
+// D10: first receive notification per queue since the receive path last drained
+rawtracepoint:sk_data_ready
+{
+  $sk = args.sk;
+  if ($sk == 0) { return; }
+  $q = (struct nvme_tcp_queue *)$sk->sk_user_data;
+  if ($q == 0) { return; }
+  if ((uint64)$q->sock->sk != (uint64)$sk) { return; }
+  @nvme_data_ready = count();
+  if (@nfirst[(uint64)$q] == 0) { @nfirst[(uint64)$q] = nsecs; }
+  $tp = (struct tcp_sock *)$sk;
+  $i = @ni[(uint64)$q];
+  @nr_t[(uint64)$q, $i % 32] = nsecs;
+  @nr_s[(uint64)$q, $i % 32] = (uint64)$tp->rcv_nxt;
+  @ni[(uint64)$q] = $i + 1;
+}
+fexit:nvme_tcp:nvme_tcp_try_recv
+{
+  if (retval == 0) { delete(@nfirst, (uint64)args.queue); }
+}
+
+fexit:nvme_tcp:nvme_tcp_try_send_cmd_pdu
+{
+  $k = (uint64)args.req;
+  if (@t_setup[$k] == 0 || retval != 1) { return; }
+  if (args.req->queue->request == 0 && @t_cmd[$k] == 0) { @t_cmd[$k] = nsecs; }   // no in-capsule data
+}
+
+fentry:nvme_tcp:nvme_tcp_setup_h2c_data_pdu
+{
+  $k = (uint64)args.req;
+  if (@t_setup[$k] == 0) { return; }
+  if (@in_recv[tid] == 0) { @h2c_setup_from_send_path = count(); return; }   // next PDU of same R2T
+  $now = nsecs;
+  @r2ts[$k] += 1;
+  if (@t_r2t[$k] == 0) {
+    @t_r2t[$k] = $now;
+    $nf = @nfirst[@qp[$k]];
+    if ($nf != 0 && $nf >= @t_cmd[$k]) { @t_r2t_notify[$k] = $nf; } else { @r2t_notify_backlogged = count(); }
+  }
+}
+
+fentry:nvme_tcp:nvme_tcp_try_send_data_pdu
+{
+  $k = (uint64)args.req;
+  if (@t_setup[$k] != 0 && @t_r2t[$k] != 0 && @t_h2c_start[$k] == 0) { @t_h2c_start[$k] = nsecs; }
+}
+
+fentry:nvme_tcp:nvme_tcp_try_send_data
+{
+  $k = (uint64)args.req;
+  if (@t_setup[$k] != 0) { @sd_t[tid] = nsecs; @sd_k[tid] = $k; }
+}
+fexit:nvme_tcp:nvme_tcp_try_send_data
+{
+  $k = (uint64)args.req;
+  if (@sd_k[tid] == $k && $k != 0) {
+    $now = nsecs;
+    @busy_h2c[$k] += $now - @sd_t[tid];
+    @send_data_calls[$k] += 1;
+    if (retval == 1 && args.req->queue->request == 0) {
+      if (@t_r2t[$k] != 0) { @t_h2c_sent[$k] = $now; }                 // solicited data done (latest)
+      else if (@t_cmd[$k] == 0) { @t_cmd[$k] = $now; @inline[$k] = 1; } // in-capsule data done
+    }
+    delete(@sd_t, tid); delete(@sd_k, tid);
+  }
+}
+
+fentry:vmlinux:blk_mq_complete_request_remote
+{
+  $r = args.rq;
+  if ($r == 0) { return; }
+  $k = (uint64)$r + sizeof(struct request);
+  if (@t_setup[$k] == 0 || @t_rsp[$k] != 0) { return; }
+  $now = nsecs;
+  @t_rsp[$k] = $now;
+  $ref = @t_r2t[$k] != 0 ? @t_h2c_sent[$k] : @t_cmd[$k];
+  $qa = @qp[$k];
+  $es = @skb_end[tid];
+  $best = (uint64)0;
+  if ($es != 0) {
+    $j = (uint64)0;
+    unroll(32) {
+      $tt = @nr_t[$qa, $j];
+      $ss = @nr_s[$qa, $j];
+      $d = (int32)(uint32)($ss - $es);
+      if ($tt != 0 && $d >= 0 && ($best == 0 || $tt < $best)) { $best = $tt; }
+      $j = $j + 1;
+    }
+  }
+  if ($best != 0 && $ref != 0 && $best >= $ref && $best <= $now) { @t_rsp_seqnotify[$k] = $best; }
+  else if ($best != 0 && $best < $ref) { @seqnotify_before_ref = count(); }
+  else { @seqnotify_unresolved = count(); }
+  $nf = @nfirst[@qp[$k]];
+  if ($nf != 0 && $ref != 0 && $nf >= $ref) { @t_rsp_notify[$k] = $nf; } else { @rsp_notify_backlogged = count(); }
+}
+
+rawtracepoint:nvme_core:nvme_complete_rq
+{
+  $c = args.req;
+  if ($c == 0) { return; }
+  $k = (uint64)$c + sizeof(struct request);
+  if (@t_setup[$k] != 0) { @t_nvme[$k] = nsecs; }
+}
+
+rawtracepoint:block_rq_complete
+{
+  $b = args.rq;
+  if ($b == 0) { return; }
+  $k = (uint64)$b + sizeof(struct request);
+  $s = @t_setup[$k];
+  if ($s == 0) { return; }
+  $now = nsecs;
+  $blk = @t_blk[$k]; $cmd = @t_cmd[$k]; $r2t = @t_r2t[$k]; $hs = @t_h2c_start[$k]; $hd = @t_h2c_sent[$k];
+  $rsp = @t_rsp[$k]; $nv = @t_nvme[$k];
+  @e2e_us = hist(($now - $blk) / 1000);
+  @len_kib = hist(@len[$k] / 1024);
+
+  if ($r2t != 0) {
+    @variant_r2t = count();
+    if (@r2ts[$k] > 1) { @variant_multi_r2t = count(); }
+    if ($blk && $cmd && $hs && $hd && $rsp && $nv && $blk <= $s && $s <= $cmd && $cmd <= $r2t && $r2t <= $hs && $hs <= $hd && $hd <= $rsp && $rsp <= $nv && $nv <= $now) {
+      $A = $s - $blk; $B = $cmd - $s; $R1 = $r2t - $cmd; $B3 = $hs - $r2t; $B4 = $hd - $hs; $R2 = $rsp - $hd; $E1 = $nv - $rsp; $E2 = $now - $nv;
+      if ($A + $B + $R1 + $B3 + $B4 + $R2 + $E1 + $E2 != $now - $blk) { @sum_check_fail = count(); }
+      @r2t_complete = count();
+      @sumA_ns = sum($A); @sumB_ns = sum($B); @sumR1_ns = sum($R1); @sumB3_ns = sum($B3); @sumB4_ns = sum($B4); @sumB4busy_ns = sum(@busy_h2c[$k]);
+      @sumR2_ns = sum($R2); @sumE1_ns = sum($E1); @sumE2_ns = sum($E2); @sumE2E_ns = sum($now - $blk);
+      @R1_cmdsent_to_r2t_us = hist($R1 / 1000);
+      @B4_h2c_transmit_us = hist($B4 / 1000);
+      @R2_h2csent_to_rsp_us = hist($R2 / 1000);
+      @B3_r2t_to_h2cstart_ns = hist($B3);
+      if (@t_r2t_notify[$k] != 0) { @D_r2t_wakeup_ns = hist($r2t - @t_r2t_notify[$k]); @C1_cmdsent_to_r2t_notify_us = hist((@t_r2t_notify[$k] - $cmd) / 1000); }
+      if (@t_rsp_notify[$k] != 0) { @D_rsp_wakeup_heuristic_ns = hist($rsp - @t_rsp_notify[$k]); }
+      $sn = @t_rsp_seqnotify[$k];
+      if ($sn != 0) {
+        @rsp_seqmapped = count();
+        @D_rsp_seqmapped_ns = hist($rsp - $sn);
+        @sumD_seq_ns = sum($rsp - $sn); @sumC3_seq_ns = sum($sn - $hd); @n_seq = count();
+        if (@t_rsp_notify[$k] != 0 && @t_rsp_notify[$k] < $sn) { @heuristic_earlier_than_seq = count(); @heuristic_minus_seq_us = hist(($sn - @t_rsp_notify[$k]) / 1000); }
+      }
+    } else { @r2t_partial_or_order = count(); }
+  } else if (@inline[$k] != 0) {
+    @variant_inline = count();
+    if ($blk && $cmd && $rsp && $nv) {
+      @inline_cmdsent_to_rsp_us = hist(($rsp - $cmd) / 1000);
+      @inline_setup_to_cmdsent_ns = hist($cmd - $s);
+    }
+  } else {
+    @variant_unclassified = count();
+  }
+  delete(@t_setup, $k); delete(@t_blk, $k); delete(@len, $k); delete(@qp, $k);
+  if ($cmd != 0) { delete(@t_cmd, $k); }
+  if ($r2t != 0) { delete(@t_r2t, $k); delete(@r2ts, $k); }
+  if ($hs != 0) { delete(@t_h2c_start, $k); }
+  if ($hd != 0) { delete(@t_h2c_sent, $k); }
+  if ($rsp != 0) { delete(@t_rsp, $k); }
+  if ($nv != 0) { delete(@t_nvme, $k); }
+  if (@busy_h2c[$k] != 0) { delete(@busy_h2c, $k); }
+  if (@send_data_calls[$k] != 0) { delete(@send_data_calls, $k); }
+  if (@inline[$k] != 0) { delete(@inline, $k); }
+  if (@t_r2t_notify[$k] != 0) { delete(@t_r2t_notify, $k); }
+  if (@t_rsp_notify[$k] != 0) { delete(@t_rsp_notify, $k); }
+  if (@t_rsp_seqnotify[$k] != 0) { delete(@t_rsp_seqnotify, $k); }
+}
+
+interval:s:10 { exit(); }
+
+END {
+  clear(@t_setup); clear(@t_blk); clear(@len); clear(@qp); clear(@t_cmd); clear(@t_r2t); clear(@r2ts);
+  clear(@t_h2c_start); clear(@t_h2c_sent); clear(@t_rsp); clear(@t_nvme); clear(@busy_h2c);
+  clear(@send_data_calls); clear(@inline); clear(@t_r2t_notify); clear(@t_rsp_notify); clear(@in_recv);
+  clear(@sd_t); clear(@sd_k); clear(@nfirst); clear(@nr_t); clear(@nr_s); clear(@ni); clear(@skb_end); clear(@t_rsp_seqnotify);
+}

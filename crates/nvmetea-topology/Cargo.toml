@@ -1,0 +1,19 @@
+[package]
+name = "nvmetea-topology"
+description = "nvmetea sysfs/diskstats/uevent collectors: NVMe subsystem, controller, namespace and path inventory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nvmetea-core = { workspace = true }
+serde = { workspace = true }
+libc = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

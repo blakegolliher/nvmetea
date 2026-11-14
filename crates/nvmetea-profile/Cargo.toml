@@ -1,0 +1,15 @@
+[package]
+name = "nvmetea-profile"
+description = "nvmetea per-command stage reconstruction and aggregation (pure logic, no BPF)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nvmetea-core = { workspace = true }
+serde = { workspace = true }
+
+[lints]
+workspace = true

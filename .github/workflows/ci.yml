@@ -1,0 +1,104 @@
+# nvmetea CI. Build, lint and unit tests on x86_64 and aarch64; the el9 RPM in a
+# Rocky Linux 9 container (glibc 2.34, the oldest supported userspace); licence
+# and advisory checks; the Prometheus exposition through promtool.
+#
+# Tests never load BPF (`--no-bpf` / fixtures): hosted runners have no NVMe/TCP
+# controllers. Runtime validation on real kernels is the VM matrix
+# (docs/implementation-plan.md §5.3), not this workflow.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build dependencies (clang for BPF CO-RE; libelf and zlib for libbpf)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang llvm libelf-dev zlib1g-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --release --locked -- -D warnings
+      - run: cargo test --workspace --release --locked
+      - name: CLI smoke test (no controllers, no BPF)
+        run: |
+          target/release/nvmetea --version
+          target/release/nvmetea status --no-bpf
+          target/release/nvmetea probe --json > probe.json
+          target/release/nvmetea __man man && ls man
+          target/release/nvmetea completions bash > /dev/null
+      - name: Exposition through promtool
+        if: matrix.runner == 'ubuntu-24.04'
+        run: |
+          v=2.53.0
+          curl -fsSL "https://github.com/prometheus/prometheus/releases/download/v$v/prometheus-$v.linux-amd64.tar.gz" \
+            | tar -xz --strip-components=1 "prometheus-$v.linux-amd64/promtool"
+          target/release/nvmetea serve --no-bpf --listen 127.0.0.1:9469 --interval 1 &
+          pid=$!
+          for i in $(seq 20); do curl -fs 127.0.0.1:9469/healthz >/dev/null && break; sleep 0.5; done
+          curl -fs 127.0.0.1:9469/metrics > metrics.txt
+          kill -TERM "$pid"; wait "$pid" || true
+          ./promtool check metrics < metrics.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nvmetea-${{ matrix.runner }}
+          path: target/release/nvmetea
+          if-no-files-found: error
+
+  rpm-el9:
+    name: RPM (Rocky Linux 9)
+    runs-on: ubuntu-24.04
+    container: rockylinux/rockylinux:9
+    steps:
+      - name: Build dependencies
+        run: |
+          dnf -y install git gcc make clang llvm elfutils-libelf-devel zlib-devel pkgconf-pkg-config \
+            rpm-build systemd-rpm-macros gzip
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the RPM
+        run: packaging/rpm/build.sh
+      - name: Inspect the RPM
+        run: |
+          rpm -qip target/rpm/nvmetea-*.rpm
+          rpm -qlp target/rpm/nvmetea-*.rpm
+          rpm -q --requires -p target/rpm/nvmetea-*.rpm
+      - name: Install and run on el9 userspace
+        run: |
+          dnf -y install target/rpm/nvmetea-*.rpm
+          nvmetea --version
+          nvmetea status --no-bpf
+          test -f /usr/share/man/man1/nvmetea.1.gz
+          test -f /usr/lib/systemd/system/nvmetea-exporter.service
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nvmetea-el9-rpm
+          path: target/rpm/*.rpm
+          if-no-files-found: error
+
+  deny:
+    name: licences and advisories
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses advisories bans sources

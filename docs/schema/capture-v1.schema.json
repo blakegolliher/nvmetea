@@ -1,0 +1,288 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nvmetea.invalid/schema/capture-v1.schema.json",
+  "title": "nvmetea capture, schema nvmetea.capture/1",
+  "description": "Written by `nvmetea record`, read by `nvmetea compare`. Readers refuse an unknown major version and ignore unknown fields. Unavailable values are null or absent, never 0. See docs/schema/capture-v1.md.",
+  "type": "object",
+  "required": [
+    "schema", "tool", "host", "boundary_signature", "capabilities", "start_unix_s", "end_unix_s",
+    "duration_s", "interval_s", "topology_start", "topology_end", "transitions", "intervals",
+    "latency", "queues", "controllers", "events", "quality", "self_overhead"
+  ],
+  "properties": {
+    "schema": { "type": "string", "pattern": "^nvmetea\\.capture/1(\\.[0-9]+)?$" },
+    "tool": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": { "name": { "type": "string" }, "version": { "type": "string" } }
+    },
+    "host": {
+      "type": "object",
+      "properties": {
+        "hostname": { "type": ["string", "null"] },
+        "boot_id": { "type": ["string", "null"] },
+        "kernel_release": { "type": ["string", "null"] },
+        "distribution": { "type": ["string", "null"] },
+        "arch": { "type": ["string", "null"] }
+      }
+    },
+    "boundary_signature": {
+      "description": "Instrumentation behind each measured quantity (keys: request, command, stages, tcp). Stage LAD is computed only when `stages` agrees.",
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["capability", "status"],
+        "properties": {
+          "capability": { "type": "string" },
+          "status": { "type": "string" },
+          "reason": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "filters": { "type": "object", "additionalProperties": { "type": "string" } },
+    "start_unix_s": { "type": "number" },
+    "end_unix_s": { "type": "number" },
+    "duration_s": { "type": "number" },
+    "interval_s": { "type": "number" },
+    "topology_start": { "$ref": "#/$defs/topology" },
+    "topology_end": { "$ref": "#/$defs/topology" },
+    "transitions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["at_unix_s", "controller", "change", "source"],
+        "properties": {
+          "at_unix_s": { "type": "number" },
+          "controller": { "type": "string" },
+          "change": { "type": "string" },
+          "source": { "type": "string" }
+        }
+      }
+    },
+    "intervals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["t_s", "interval_s", "controllers"],
+        "properties": {
+          "t_s": { "type": "number" },
+          "interval_s": { "type": "number" },
+          "controllers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["controller", "state"],
+              "properties": {
+                "controller": { "type": "string" },
+                "state": { "type": "string" },
+                "read_iops": { "type": ["number", "null"] },
+                "write_iops": { "type": ["number", "null"] },
+                "read_bytes_per_s": { "type": ["number", "null"] },
+                "write_bytes_per_s": { "type": ["number", "null"] },
+                "read_mean_us": { "type": ["number", "null"] },
+                "write_mean_us": { "type": ["number", "null"] },
+                "inflight": { "type": ["integer", "null"] },
+                "tcp_rtt_median_us": { "type": ["integer", "null"] },
+                "tcp_retrans_segments_per_s": { "type": ["number", "null"] }
+              }
+            }
+          }
+        }
+      }
+    },
+    "latency": {
+      "description": "Level 1 latency over the capture window (end minus start of cumulative histograms), per controller and op.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["controller", "key", "op", "metric", "dist"],
+        "properties": {
+          "controller": { "type": "string" },
+          "key": { "$ref": "#/$defs/controller_key" },
+          "op": { "type": "string" },
+          "metric": { "enum": ["command", "request", "stage_a", "stage_e2"] },
+          "dist": { "$ref": "#/$defs/dist" }
+        }
+      }
+    },
+    "queues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["controller", "qid", "op", "dispatched", "bytes", "completed", "nvme_errors"],
+        "properties": {
+          "controller": { "type": "string" },
+          "qid": { "type": "integer" },
+          "op": { "type": "string" },
+          "dispatched": { "type": "integer" },
+          "bytes": { "type": "integer" },
+          "completed": { "type": "integer" },
+          "nvme_errors": { "type": "integer" }
+        }
+      }
+    },
+    "controllers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["controller", "key", "retries", "failovers", "requeues", "nvme_errors"],
+        "properties": {
+          "controller": { "type": "string" },
+          "key": { "$ref": "#/$defs/controller_key" },
+          "retries": { "type": "integer" },
+          "failovers": { "type": "integer" },
+          "requeues": { "type": "integer" },
+          "nvme_errors": { "type": "integer" },
+          "tcp_retrans_segments": { "type": ["integer", "null"] }
+        }
+      }
+    },
+    "stages": {
+      "description": "Level 2 stage aggregates of sampled commands (absent without `--sample`). Only complete records are in the stage distributions.",
+      "type": ["object", "null"],
+      "required": ["sample_every", "flavour", "records", "sum_check_failures", "groups"],
+      "properties": {
+        "sample_every": { "type": "integer" },
+        "flavour": { "enum": ["fentry", "kprobe"] },
+        "records": { "type": "integer" },
+        "sum_check_failures": { "type": "integer" },
+        "groups": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["op", "variant", "size_class", "complete", "partial", "excluded", "request", "stages"],
+            "properties": {
+              "controller": { "type": ["string", "null"] },
+              "key": { "oneOf": [{ "$ref": "#/$defs/controller_key" }, { "type": "null" }] },
+              "op": { "type": "string" },
+              "variant": { "type": "string" },
+              "size_class": { "type": "integer", "description": "floor(log2(bytes))" },
+              "complete": { "type": "integer" },
+              "partial": { "type": "integer" },
+              "excluded": { "type": "integer" },
+              "request": { "$ref": "#/$defs/dist" },
+              "stages": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["stage", "family", "label", "dist"],
+                  "properties": {
+                    "stage": { "type": "string" },
+                    "family": { "enum": ["A", "B", "C", "D", "E", "?"] },
+                    "label": { "type": "string" },
+                    "bound": { "type": ["string", "null"] },
+                    "dist": { "$ref": "#/$defs/dist" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["at_unix_s", "kind", "text"],
+        "properties": {
+          "at_unix_s": { "type": "number" },
+          "kind": { "enum": ["slow", "state", "tcp", "timeout", "uevent"] },
+          "text": { "type": "string" }
+        }
+      }
+    },
+    "quality": {
+      "type": "object",
+      "required": ["events_dropped"],
+      "properties": {
+        "level1": { "type": "object", "additionalProperties": { "type": "integer" } },
+        "level2": { "type": "object", "additionalProperties": { "type": "integer" } },
+        "events_dropped": { "type": "integer" }
+      }
+    },
+    "self_overhead": {
+      "type": "object",
+      "properties": {
+        "cpu_seconds": { "type": ["number", "null"] },
+        "max_rss_bytes": { "type": ["integer", "null"] }
+      }
+    }
+  },
+  "$defs": {
+    "controller_key": {
+      "description": "Controller identity across captures: subsystem NQN + fabric address (nvmeN is not stable).",
+      "type": "object",
+      "properties": {
+        "subsysnqn": { "type": ["string", "null"] },
+        "transport": { "type": ["string", "null"] },
+        "traddr": { "type": ["string", "null"] },
+        "trsvcid": { "type": ["string", "null"] },
+        "host_traddr": { "type": ["string", "null"] }
+      }
+    },
+    "dist": {
+      "type": "object",
+      "required": ["count", "hist"],
+      "properties": {
+        "count": { "type": "integer" },
+        "sum_ns": { "type": ["integer", "null"], "description": "exact sum; null when only the histogram is known" },
+        "hist": {
+          "description": "sparse [bucket index, count] pairs of the log-linear histogram (docs/architecture.md §4.4)",
+          "type": "array",
+          "items": { "type": "array", "prefixItems": [{ "type": "integer" }, { "type": "integer" }], "minItems": 2, "maxItems": 2 }
+        }
+      }
+    },
+    "topology": {
+      "type": "object",
+      "required": ["controllers", "namespaces"],
+      "properties": {
+        "controllers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "key", "state"],
+            "properties": {
+              "name": { "type": "string" },
+              "key": { "$ref": "#/$defs/controller_key" },
+              "state": { "type": "string" },
+              "generation": { "type": ["integer", "null"] },
+              "epoch": { "type": ["integer", "null"] },
+              "io_queues": { "type": ["integer", "null"] },
+              "queue_depth": { "type": ["integer", "null"] }
+            }
+          }
+        },
+        "namespaces": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "paths"],
+            "properties": {
+              "name": { "type": "string" },
+              "nsid": { "type": ["integer", "null"] },
+              "wwid": { "type": ["string", "null"] },
+              "paths": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["name", "controller"],
+                  "properties": {
+                    "name": { "type": "string" },
+                    "controller": { "type": "string" },
+                    "ana_state": { "type": ["string", "null"] }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

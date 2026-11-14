@@ -1,0 +1,23 @@
+nvmetea
+=======
+
+Userspace code is licensed under the MIT License (see LICENSE).
+BPF programs under bpf/ are licensed "Dual MIT/GPL" so that the kernel accepts
+them as GPL-compatible.
+
+Design references and acknowledgements
+--------------------------------------
+
+ntprof (https://github.com/netlab-wisconsin/ntprof), GPL-2.0, and the NTProf
+paper (NSDI '25). nvmetea's NVMe/TCP hook selection draws on ntprof's design
+documentation:
+  - the sk_user_data transport test,
+  - per-thread contexts in per-CPU slots,
+  - the receive data-phase busy/wait split,
+  - skb receive timestamps,
+  - the fentry attach-stall handling,
+  - Latency Amplification Degree.
+nvmetea does not copy ntprof source code.
+
+nfs-gaze and nfsview (https://github.com/blakegolliher), MIT: CLI,
+capture/compare and TUI patterns.

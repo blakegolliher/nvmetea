@@ -1,0 +1,32 @@
+[package]
+name = "nvmetea-cli"
+description = "nvmetea command-line interface"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "nvmetea"
+path = "src/main.rs"
+
+[dependencies]
+nvmetea-core = { workspace = true }
+nvmetea-topology = { workspace = true }
+nvmetea-tcp = { workspace = true }
+nvmetea-bpf = { workspace = true }
+nvmetea-profile = { workspace = true }
+nvmetea-export = { workspace = true }
+nvmetea-tui = { workspace = true }
+tiny_http = "0.12"
+clap_complete = "4"
+clap_mangen = "0.2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+libc = { workspace = true }
+
+[lints]
+workspace = true

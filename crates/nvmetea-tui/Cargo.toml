@@ -1,0 +1,15 @@
+[package]
+name = "nvmetea-tui"
+description = "nvmetea terminal UI (Ratatui): renders view models built by the CLI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+
+[lints]
+workspace = true

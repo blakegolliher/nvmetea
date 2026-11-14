@@ -1,0 +1,7 @@
+/target/
+/dist/
+*.rpm
+*.deb
+nvmetea-capture-*.json
+__pycache__/
+*.pyc

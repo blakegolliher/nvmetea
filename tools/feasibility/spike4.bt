@@ -1,0 +1,124 @@
+// nvmetea Phase-0 spike #4: multi-PDU READ data phase on a kernel where
+// nvme_tcp_handle_c2h_data / nvme_tcp_recv_data are inlined (read-only; generates no I/O).
+// Receive context: nvme_tcp_recv_skb entry/exit (per thread). Inside it, each
+// skb_copy_datagram_iter while queue->pdu holds a C2H data header identifies the read by
+// (queue, command_id) -> request PDU address.
+
+rawtracepoint:nvme_core:nvme_setup_cmd
+{
+  $rq = args.req;
+  if ($rq == 0) { return; }
+  $cmd = args.cmd;
+  if ($cmd == 0) { return; }
+  $treq = (struct nvme_tcp_request *)((uint64)$rq + sizeof(struct request));
+  $q = $treq->queue;
+  if ($q == 0) { return; }
+  if ((uint64)$q->sock->sk->sk_user_data != (uint64)$q) { return; }
+  if ($cmd->common.opcode != 2) { return; }          // READ only for this spike
+  $k = (uint64)$treq;
+  @t_setup[$k] = nsecs;
+  @len[$k] = $rq->__data_len;
+  @by_cid[(uint64)$q, $cmd->common.command_id] = $k;
+}
+
+fexit:nvme_tcp:nvme_tcp_try_send_cmd_pdu
+{
+  if (retval == 1 && args.req->queue->request == 0) {
+    $k = (uint64)args.req;
+    if (@t_setup[$k] != 0 && @t_sent[$k] == 0) { @t_sent[$k] = nsecs; }
+  }
+}
+
+fentry:nvme_tcp:nvme_tcp_recv_skb
+{
+  $sk = args.skb->sk;
+  if ($sk == 0) { return; }
+  $q = (struct nvme_tcp_queue *)$sk->sk_user_data;
+  if ($q == 0) { return; }
+  if ((uint64)$q->sock->sk != (uint64)$sk) { @recv_ctx_invalid = count(); return; }
+  @rx_q[tid] = (uint64)$q;
+  @rx_enter[tid] = nsecs;
+}
+
+fexit:nvme_tcp:nvme_tcp_recv_skb
+{
+  $k = @rx_req[tid];
+  if ($k != 0) {
+    @busy[$k] += nsecs - @rx_busy_from[tid];
+    @calls[$k] += 1;
+    delete(@rx_req, tid); delete(@rx_busy_from, tid);
+  }
+  delete(@rx_q, tid); delete(@rx_enter, tid);
+}
+
+fentry:vmlinux:skb_copy_datagram_iter
+{
+  $qa = @rx_q[tid];
+  if ($qa == 0) { return; }
+  $q = (struct nvme_tcp_queue *)$qa;
+  $hdr = (uint8 *)$q->pdu;
+  $type = *$hdr;
+  if ($type != 7) { return; }                         // nvme_tcp_c2h_data
+  $cid = *(uint16 *)((uint64)$hdr + 8);               // struct nvme_tcp_data_pdu.command_id
+  $k = @by_cid[$qa, $cid];
+  if ($k == 0) { @c2h_unmatched = count(); return; }
+  $now = nsecs;
+  if (@t_c2h_first[$k] == 0) { @t_c2h_first[$k] = $now; }
+  @t_c2h_last[$k] = $now;
+  @copies[$k] += 1;
+  $prev = @rx_req[tid];
+  if ($prev != $k) {
+    if ($prev != 0) { @busy[$prev] += $now - @rx_busy_from[tid]; @calls[$prev] += 1; }
+    @rx_req[tid] = $k;
+    @rx_busy_from[tid] = $now;
+  }
+}
+
+rawtracepoint:nvme_core:nvme_complete_rq
+{
+  $creq = args.req;
+  if ($creq == 0) { return; }
+  $k = (uint64)$creq + sizeof(struct request);
+  $t0 = @t_setup[$k];
+  if ($t0 == 0) { return; }
+  $now = nsecs;
+  // a read that completes inside the recv_skb call that carried its data
+  if (@rx_req[tid] == $k) {
+    @busy[$k] += $now - @rx_busy_from[tid]; @calls[$k] += 1;
+    delete(@rx_req, tid); delete(@rx_busy_from, tid);
+  }
+  $ts = @t_sent[$k]; $f = @t_c2h_first[$k]; $l = @t_c2h_last[$k];
+  if ($ts != 0 && $f != 0 && $l >= $f && $f >= $ts) {
+    $span = $l - $f;
+    $b = @busy[$k];
+    @reads_fully_staged = count();
+    @C1_sent_to_first_c2h_copy_us = hist(($f - $ts) / 1000);
+    @C2_first_to_last_c2h_copy_us = hist($span / 1000);
+    @C3_last_copy_to_nvmedone_ns = hist($now - $l);
+    @C2_host_busy_share_pct = lhist($span > 0 ? ($b > $span ? 100 : $b * 100 / $span) : 100, 0, 101, 10);
+    @copies_per_read = hist(@copies[$k]);
+    @len_vs_copies[@len[$k] / 1024] = stats(@copies[$k]);
+    if (@printed < 10) {
+      @printed++;
+      printf("READ %dKiB: sent->firstC2H=%lldus firstC2H->lastC2H=%lldus (host busy %lldus over %d recv_skb calls, %d copies) last->done=%lldns\n",
+        @len[$k] / 1024, ($f - $ts) / 1000, $span / 1000, $b / 1000, @calls[$k], @copies[$k], $now - $l);
+    }
+  } else {
+    @reads_not_staged = count();
+    if ($f == 0) { @no_c2h_seen = count(); }
+    if ($ts == 0) { @no_sent_seen = count(); }
+  }
+  delete(@t_setup, $k); delete(@len, $k);
+  if ($ts != 0) { delete(@t_sent, $k); }
+  if ($f != 0) { delete(@t_c2h_first, $k); delete(@t_c2h_last, $k); delete(@copies, $k); }
+  if (@busy[$k] != 0) { delete(@busy, $k); }
+  if (@calls[$k] != 0) { delete(@calls, $k); }
+}
+
+interval:s:10 { exit(); }
+
+END {
+  clear(@t_setup); clear(@len); clear(@by_cid); clear(@t_sent); clear(@rx_q); clear(@rx_enter);
+  clear(@rx_req); clear(@rx_busy_from); clear(@t_c2h_first); clear(@t_c2h_last); clear(@copies);
+  clear(@busy); clear(@calls); clear(@printed);
+}

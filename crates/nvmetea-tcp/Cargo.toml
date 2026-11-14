@@ -1,0 +1,17 @@
+[package]
+name = "nvmetea-tcp"
+description = "nvmetea TCP transport telemetry: sock_diag, tcp_info, /proc/net/tcp, controller association"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nvmetea-core = { workspace = true }
+nvmetea-topology = { workspace = true }
+libc = { workspace = true }
+serde = { workspace = true }
+
+[lints]
+workspace = true

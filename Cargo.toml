@@ -1,0 +1,43 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/nvmetea-core",
+    "crates/nvmetea-topology",
+    "crates/nvmetea-tcp",
+    "crates/nvmetea-bpf",
+    "crates/nvmetea-profile",
+    "crates/nvmetea-export",
+    "crates/nvmetea-tui",
+    "crates/nvmetea-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+publish = false
+
+[workspace.dependencies]
+nvmetea-core = { path = "crates/nvmetea-core" }
+nvmetea-topology = { path = "crates/nvmetea-topology" }
+nvmetea-tcp = { path = "crates/nvmetea-tcp" }
+nvmetea-bpf = { path = "crates/nvmetea-bpf" }
+nvmetea-profile = { path = "crates/nvmetea-profile" }
+nvmetea-export = { path = "crates/nvmetea-export" }
+nvmetea-tui = { path = "crates/nvmetea-tui" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4

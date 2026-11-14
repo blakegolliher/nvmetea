@@ -1,0 +1,136 @@
+// nvmetea Phase-0 feasibility spike #3 (read-only observation; generates no I/O).
+// Keys every per-request map by the nvme_tcp_request (driver PDU) address = rq + sizeof(struct request),
+// which avoids negative pointer arithmetic on BTF-typed pointers.
+
+rawtracepoint:nvme_core:nvme_setup_cmd
+{
+  $rq = args.req;
+  if ($rq == 0) { return; }
+  $cmd = args.cmd;
+  if ($cmd == 0) { return; }
+  $treq = (struct nvme_tcp_request *)((uint64)$rq + sizeof(struct request));
+  $k = (uint64)$treq;
+  $q = $treq->queue;
+  if ($q == 0) { @not_tcp_setup = count(); return; }
+  if ((uint64)$q->sock->sk->sk_user_data != (uint64)$q) { @not_tcp_setup = count(); return; }
+
+  $ctrl = $q->ctrl;
+  $qoff = (uint64)$q - (uint64)$ctrl->queues;
+  $qsz = (uint64)sizeof(struct nvme_tcp_queue);
+  $qid = $qoff == 0 ? 0 : ($qoff == $qsz ? 1 : ($qoff == 2*$qsz ? 2 : ($qoff == 3*$qsz ? 3 : ($qoff == 4*$qsz ? 4 : ($qoff == 5*$qsz ? 5 : ($qoff == 6*$qsz ? 6 : ($qoff == 7*$qsz ? 7 : ($qoff == 8*$qsz ? 8 : 999))))))));
+  $qid_tp = $rq->q->queuedata != 0 ? $rq->mq_hctx->queue_num + 1 : 0;
+  $cid = $cmd->common.command_id;
+  $gen = $treq->req.genctr;
+  $tag = $rq->tag;
+  $op = $cmd->common.opcode;
+
+  @t_setup[$k] = nsecs;
+  @setup_tid[$k] = tid;
+  @cid[$k] = $cid;
+  @meta[$k] = ($ctrl->ctrl.instance, $qid, $op, $rq->__data_len, cpu, $q->io_cpu);
+  @t_blkstart[$k] = $rq->start_time_ns;
+
+  @cmds_by_ctrl_qid[$ctrl->ctrl.instance, $qid] = count();
+  @cmds_by_opcode_isio[$op, (uint64)($qid != 0)] = count();
+  @io_bytes_by_opcode[$op] = hist($rq->__data_len);
+  if ((uint64)$qid != (uint64)$qid_tp) { @qid_driver_vs_tracepoint_mismatch = count(); }
+  @qid_checked = count();
+  if ($cid != ((($gen & 0xf) << 12) | ($tag & 0xfff))) { @cid_not_genctr_tag = count(); }
+  if (cpu == $q->io_cpu) { @submit_on_io_cpu = count(); } else { @submit_off_io_cpu = count(); }
+
+  $sk = $q->sock->sk;
+  @qsock[$ctrl->ctrl.instance, $qid] = ($sk->__sk_common.skc_cookie.counter, $sk->__sk_common.skc_num, $q->io_cpu);
+}
+
+// command (and in-capsule data) fully handed to the socket
+fexit:nvme_tcp:nvme_tcp_try_send_cmd_pdu
+{
+  if (retval == 1 && args.req->queue->request == 0) {
+    $k = (uint64)args.req;
+    if (@t_setup[$k] != 0 && @t_sent[$k] == 0) {
+      @t_sent[$k] = nsecs;
+      @sent_ctx[$k] = (tid == @setup_tid[$k]) ? 1 : 2;   // 1 = direct in submitter, 2 = deferred (io_work)
+    }
+  }
+}
+fexit:nvme_tcp:nvme_tcp_try_send_data
+{
+  if (retval == 1 && args.req->queue->request == 0) {
+    $k = (uint64)args.req;
+    if (@t_setup[$k] != 0 && @t_sent[$k] == 0) {
+      @t_sent[$k] = nsecs;
+      @sent_ctx[$k] = (tid == @setup_tid[$k]) ? 1 : 2;
+      @sent_after_data = count();
+    }
+  }
+}
+fentry:nvme_tcp:nvme_tcp_setup_h2c_data_pdu { @r2t_seen = count(); }
+
+rawtracepoint:nvme_core:nvme_complete_rq
+{
+  $creq = args.req;
+  if ($creq == 0) { return; }
+  $treq = (struct nvme_tcp_request *)((uint64)$creq + sizeof(struct request));
+  $k = (uint64)$treq;
+  $t0 = @t_setup[$k];
+  if ($t0 == 0) { return; }
+  $now = nsecs;
+  if ($treq->req.cmd->common.command_id != @cid[$k]) { @complete_cid_mismatch = count(); }
+  @complete_checked = count();
+  if ($treq->req.status != 0) { @nvme_status_nonzero = count(); }
+  @lat_setup_to_nvmedone_us = hist(($now - $t0) / 1000);
+  $ts = @t_sent[$k];
+  if ($ts != 0) {
+    if (@sent_ctx[$k] == 1) {
+      @stageB_setup_to_sent_direct_ns = hist($ts - $t0);
+    } else {
+      @stageB_setup_to_sent_deferred_ns = hist($ts - $t0);
+    }
+    @stageC_sent_to_nvmedone_us = hist(($now - $ts) / 1000);
+  } else {
+    @no_sent_stamp = count();
+  }
+  @t_nvmedone[$k] = $now;
+}
+
+rawtracepoint:block_rq_complete
+{
+  $brq = args.rq;
+  if ($brq == 0) { return; }
+  $k = (uint64)$brq + sizeof(struct request);
+  $d = @t_nvmedone[$k];
+  if ($d == 0) { return; }
+  $now = nsecs;
+  @stageE_nvmedone_to_blkdone_ns = hist($now - $d);
+  $bs = @t_blkstart[$k];
+  if ($bs != 0) {
+    @e2e_blkstart_to_blkdone_us = hist(($now - $bs) / 1000);
+    @stageA_blkstart_to_setup_ns = hist(@t_setup[$k] - $bs);
+    if (@t_setup[$k] < $bs) { @blkstart_after_setup = count(); }
+  } else {
+    @blkstart_zero = count();
+  }
+  @completed = count();
+  if (@printed < 8) {
+    @printed++;
+    printf("%s qid=%d op=%d len=%d scpu=%d iocpu=%d ccpu=%d A(blk->setup)=%lldns B(setup->sent)=%lldns[%s] C(sent->nvmedone)=%lldus E(nvmedone->blkdone)=%lldns e2e=%lldus\n",
+      "ctrl", @meta[$k].1, @meta[$k].2, @meta[$k].3, @meta[$k].4, @meta[$k].5, cpu,
+      $bs ? @t_setup[$k] - $bs : -1,
+      @t_sent[$k] ? @t_sent[$k] - @t_setup[$k] : -1, @sent_ctx[$k] == 1 ? "direct" : "deferred",
+      @t_sent[$k] ? ($d - @t_sent[$k]) / 1000 : -1, $now - $d, $bs ? ($now - $bs) / 1000 : -1);
+  }
+  delete(@t_setup, $k); delete(@setup_tid, $k); delete(@cid, $k); delete(@meta, $k);
+  delete(@t_blkstart, $k); delete(@t_nvmedone, $k);
+  if (@t_sent[$k] != 0) { delete(@t_sent, $k); delete(@sent_ctx, $k); }
+}
+
+fentry:nvme_tcp:nvme_tcp_io_work { @iow_t[tid] = nsecs; @io_work_calls = count(); @io_work_cpu[cpu] = count(); }
+fexit:nvme_tcp:nvme_tcp_io_work { $t = @iow_t[tid]; if ($t != 0) { @io_work_elapsed_ns = hist(nsecs - $t); delete(@iow_t, tid); } }
+fentry:nvme_tcp:nvme_tcp_recv_skb { @recv_skb_calls = count(); }
+
+interval:s:15 { exit(); }
+
+END {
+  clear(@t_setup); clear(@setup_tid); clear(@cid); clear(@meta); clear(@t_blkstart);
+  clear(@t_nvmedone); clear(@t_sent); clear(@sent_ctx); clear(@iow_t); clear(@printed);
+}

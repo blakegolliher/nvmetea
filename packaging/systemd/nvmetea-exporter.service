@@ -1,0 +1,51 @@
+# nvmetea Prometheus exporter. Settings: /etc/sysconfig/nvmetea-exporter (RPM)
+# or /etc/default/nvmetea-exporter (DEB).
+[Unit]
+Description=nvmetea Prometheus exporter (NVMe/TCP initiator telemetry, read-only)
+Documentation=man:nvmetea-serve(1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=NVMETEA_LISTEN=127.0.0.1:9469
+Environment=NVMETEA_ARGS=
+EnvironmentFile=-/etc/sysconfig/nvmetea-exporter
+EnvironmentFile=-/etc/default/nvmetea-exporter
+ExecStart=/usr/bin/nvmetea serve --listen ${NVMETEA_LISTEN} $NVMETEA_ARGS
+Restart=on-failure
+RestartSec=5
+
+# BPF collectors: load programs (CAP_BPF), attach tracepoints/kprobes and read
+# kernel memory through BPF (CAP_PERFMON); CAP_SYS_ADMIN because libbpf reads
+# module BTF (nvme_core, nvme_tcp) by BTF object id for CO-RE, which the kernel
+# allows only with it; CAP_SYS_RESOURCE for the memlock limit on kernels that
+# charge BPF memory to RLIMIT_MEMLOCK. Without them nvmetea still serves the
+# passive (sysfs/diskstats/sock_diag) metrics and says why. SIGTERM (systemctl
+# stop) finishes the current snapshot and exits; BPF links close with the
+# process.
+# A transient unprivileged uid: the capabilities below are all it has.
+DynamicUser=yes
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_RESOURCE
+AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_RESOURCE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target
