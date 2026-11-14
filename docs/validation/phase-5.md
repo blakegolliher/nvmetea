@@ -17,7 +17,7 @@ commands/s.
 | Packaging | `packaging/stage.sh`, `packaging/rpm/`, `packaging/deb/` | el9 RPM `nvmetea-0.1.0-1.el9.x86_64.rpm`, 1.9 MB: binary, 14 man pages, bash/zsh/fish completions, unit, environment file, licences, docs. Highest glibc symbol 2.34. **The DEB recipe is untested** (no Debian tooling on this host) |
 | systemd unit hardening | `packaging/systemd/nvmetea-exporter.service` | `DynamicUser=yes`; capability bounding and ambient sets = CAP_BPF, CAP_PERFMON, CAP_SYS_ADMIN, CAP_SYS_RESOURCE; `ProtectSystem=strict`, `ProtectKernelTunables`, `ProtectKernelLogs`, `ProtectKernelModules`, `PrivateDevices`, `MemoryDenyWriteExecute`, `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK`, … |
 | Robustness (fuzz-style) tests | `crates/{nvmetea-topology,nvmetea-tcp,nvmetea-bpf,nvmetea-export}/tests/robustness.rs`; `nvmetea-tcp` sock_diag in-crate | 20,000–50,000 mutated inputs each: diskstats, uevents, addresses, `tcp_info` of any length, `/proc/net/tcp`, BTF blobs, kallsyms, captures, netlink messages. **Found and fixed one panic:** non-ASCII input in `/proc/net` address parsing |
-| CI workflow | `.github/workflows/ci.yml`, `deny.toml` | x86_64 and aarch64 fmt/clippy/test/smoke, `promtool check metrics`, el9 RPM built and installed in a Rocky 9 container, cargo-deny. **Not run**: no repository yet (decision D-7). The YAML parses |
+| CI workflow | `.github/workflows/ci.yml`, `deny.toml` | x86_64 and aarch64 fmt/clippy/test/smoke, `promtool check metrics`, el9 RPM built and installed in a Rocky 9 container, cargo-deny. Green on GitHub Actions (below) |
 | Metrics reference | `docs/metrics.md` | all 61 families: type, labels, meaning, source, conventions, queries |
 | Troubleshooting guide | `docs/troubleshooting.md` | reason codes, privileges, symptoms, stage-profiling notes, stopping, reporting |
 
@@ -66,6 +66,26 @@ commands/s.
   backgrounds the TUI's process group, and the TUI stopped on SIGTTOU. This
   is not an nvmetea bug. The test now uses `timeout --foreground`.
 
+## First CI runs (GitHub Actions)
+
+The first runs found three build problems that the development host could
+not show:
+
+| Problem | Seen on | Fix |
+|---|---|---|
+| `asm/types.h` not found: `clang -target bpf` does not search Debian/Ubuntu's multiarch include directory | Ubuntu 24.04, x86_64 and arm64 | `build.rs` adds `/usr/include/<triple>` with `-idirafter` when it holds `asm/types.h` |
+| `Invalid usage of the XADD return value`: clang < 20 defaults to BPF ISA v1 | Ubuntu 24.04 (clang 18) | build with `-mcpu=v3` (kernel 5.12+). With clang 21 the four objects are byte-identical to the previous default, so the released binary is unchanged |
+| Skeleton generation `Broken pipe`: libbpf-cargo pipes through `rustfmt`, absent from a minimal toolchain | Rocky 9 container | install `rustfmt`; listed in the README build requirements |
+
+Two CI-only fixes: the `rockylinux:9` image sets no `PATH` (the job sets
+it), and it sets `tsflags=nodocs`, so the man-page check needs docs installed.
+
+After these fixes, both Ubuntu jobs pass on x86_64 and aarch64: fmt, clippy,
+all tests, the CLI smoke test and, on x86_64, `promtool check metrics`
+(Prometheus 2.53.0). The el9 RPM builds, installs and runs in Rocky 9, and
+cargo-deny's licence, advisory, ban and source checks pass. This covers
+building and unit tests on aarch64, not running against an aarch64 kernel.
+
 ## Automated tests
 
 `cargo test --workspace`: **126 passed, 0 failed**. `clippy -D warnings` and
@@ -80,9 +100,9 @@ commands/s.
 |---|---|---|
 | Overhead benchmarks per `implementation-plan.md` §6 (added latency at QD1, IOPS regression, ≥ 5 alternating runs) | needs a dedicated target and controllable I/O. The development host's storage carries the operator's workload, and nvmetea does not generate I/O on it | a benchmark VM with an NVMe/TCP loopback target (qemu/KVM) |
 | Runtime matrix: stock Rocky 9 5.14, Ubuntu 22.04/24.04, mainline | qemu is not installed (`/dev/kvm` exists); images must be downloaded | approval to install qemu-kvm and download cloud images |
-| aarch64 | no cross toolchain or ARM host here. CI has an arm64 runner job | a run of the CI workflow, or an ARM VM |
+| aarch64 runtime and release binary | CI builds and tests on arm64, but BPF has not been loaded on an aarch64 kernel | an ARM host or VM |
 | DEB package | recipe written, untested | an Ubuntu container or VM |
-| CI, cargo-deny, `promtool`, MSRV 1.85 | not run: no repository (D-7). cargo-deny and promtool are not installed here. The exposition is checked by nvmetea's own validator in tests | the repository |
+| MSRV 1.85 | CI uses stable Rust | a CI job pinned to 1.85 |
 | `--btf-dir` (modules without BTF) | deferred | — |
 | Text-tracepoint fallback (P1b/P2b), BPF generations (P9) | deferred since Phase 2 | — |
 | Per-queue histograms beyond 903 queues | counted (`map_full{hist}`), not stored | a sparse overflow map if such hosts appear |
